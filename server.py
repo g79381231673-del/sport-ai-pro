@@ -16,17 +16,21 @@ if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
 WELCOME = """🏟 SPORT RISK ANALYST PRO
 
-Отправь мне матч или скриншот линии.
+Привет! 👋 Добро пожаловать.
 
-🎁 Бесплатно — 2 запроса в день.
+🎁 У вас есть 2 бесплатных запроса в день.
 
-💳 Тарифы:
-🔥 5 запросов в день — 250 ₽ / 7 дней | 500 ₽ / 14 дней
-⚡ 10 запросов в день — 600 ₽ / 7 дней | 1 000 ₽ / 14 дней
+Отправьте матч или скриншот линии — запрос будет передан аналитику.
 
 ⏱ Ответ на запрос — в течение 5 минут — 1 часа.
 
-После этого администратор отправит вам готовый прогноз."""
+💳 Если бесплатных запросов недостаточно:
+🔥 5 запросов в день — 250 ₽ / 7 дней | 500 ₽ / 14 дней
+⚡ 10 запросов в день — 600 ₽ / 7 дней | 1 000 ₽ / 14 дней
+
+📩 Для оплаты: @ZotickNick
+
+После оплаты администратор активирует тариф."""
 PRICES = """💳 ТАРИФЫ SPORT RISK ANALYST PRO
 
 🎁 Бесплатно
@@ -47,8 +51,8 @@ PRICES = """💳 ТАРИФЫ SPORT RISK ANALYST PRO
 После оплаты администратор активирует тариф."""
 request_targets: dict[int, int] = {}
 daily_usage: dict[int, tuple[str, int]] = {}
-# user_id -> (daily_limit, expires_at_iso)
 paid_plans: dict[int, tuple[int, str]] = {}
+welcomed_users: set[int] = set()
 def admin_id() -> int | None:
     try:
         return int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
@@ -94,11 +98,8 @@ async def give_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Формат: /give USER_ID LIMIT DAYS\nНапример: /give 5907925729 10 7")
         return
     try:
-        user_id = int(context.args[0])
-        limit = int(context.args[1])
-        days = int(context.args[2])
-        if limit not in (5, 10) or days not in (7, 14):
-            raise ValueError
+        user_id = int(context.args[0]); limit = int(context.args[1]); days = int(context.args[2])
+        if limit not in (5, 10) or days not in (7, 14): raise ValueError
     except ValueError:
         await update.message.reply_text("Ошибка. LIMIT: 5 или 10. DAYS: 7 или 14.")
         return
@@ -108,13 +109,10 @@ async def give_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"✅ Тариф активирован\n👤 {user_id}\n⚡ {limit} запросов/день\n📅 {days} дней\n⏳ До: {expires.strftime('%d.%m.%Y %H:%M')}")
     try:
         await context.bot.send_message(chat_id=user_id, text=f"✅ Вам активирован тариф: {limit} запросов в день на {days} дней.\n\nТариф действует до {expires.strftime('%d.%m.%Y %H:%M')}.")
-    except Exception:
-        log.exception("failed to notify user about paid plan")
+    except Exception: log.exception("failed to notify user about paid plan")
 async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    chat = update.effective_chat
-    if not message or not chat:
-        return
+    message = update.effective_message; chat = update.effective_chat
+    if not message or not chat: return
     admin = admin_id()
     if admin is not None and chat.id == admin:
         reply = message.reply_to_message
@@ -130,6 +128,9 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if admin is None:
         await message.reply_text("⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render.")
         return
+    if chat.id not in welcomed_users:
+        welcomed_users.add(chat.id)
+        await message.reply_text(WELCOME)
     allowed, remaining, limit = check_and_use_request(chat.id)
     if not allowed:
         await message.reply_text(f"⚠️ Лимит {limit} запросов на сегодня исчерпан.\n\n💳 Для продолжения доступны тарифы:\n🔥 5 запросов/день — 250 ₽ за 7 дней или 500 ₽ за 14 дней\n⚡ 10 запросов/день — 600 ₽ за 7 дней или 1 000 ₽ за 14 дней\n\n📩 Для оплаты: @ZotickNick\nПодробнее: /prices")
@@ -151,20 +152,13 @@ bot_app.add_handler(CommandHandler("give", give_command))
 bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.updater.start_polling()
+    await bot_app.initialize(); await bot_app.start(); await bot_app.updater.start_polling()
     log.info("Telegram relay bot started")
-    try:
-        yield
+    try: yield
     finally:
-        await bot_app.updater.stop()
-        await bot_app.stop()
-        await bot_app.shutdown()
-app = FastAPI(title="Sport Risk Analyst Pro", version="0.5.0", lifespan=lifespan)
+        await bot_app.updater.stop(); await bot_app.stop(); await bot_app.shutdown()
+app = FastAPI(title="Sport Risk Analyst Pro", version="0.6.0", lifespan=lifespan)
 @app.get("/")
-async def root():
-    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
+async def root(): return {"status":"ok","service":"sport-ai-pro","mode":"manual-relay"}
 @app.get("/health")
-async def health():
-    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
+async def health(): return {"status":"ok","service":"sport-ai-pro","mode":"manual-relay"}
