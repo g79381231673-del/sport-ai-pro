@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -13,6 +14,7 @@ log = logging.getLogger("sport-ai-pro")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+DAILY_LIMIT = 2
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
@@ -21,13 +23,15 @@ WELCOME = """🏟 SPORT RISK ANALYST PRO
 
 Отправь мне матч или скриншот линии.
 
-Я передам запрос аналитику.
+🎁 У тебя 2 бесплатных запроса в день.
 
 ⏱ Вы получите ответ в течение 3–5 минут.
 
 После этого администратор отправит вам готовый прогноз."""
 
 request_targets: dict[int, int] = {}
+# user_id -> [date string, number of requests today]
+daily_usage: dict[int, tuple[str, int]] = {}
 
 
 def admin_id() -> int | None:
@@ -35,6 +39,19 @@ def admin_id() -> int | None:
         return int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
     except ValueError:
         return None
+
+
+def check_and_use_request(user_id: int) -> tuple[bool, int]:
+    today = datetime.now().date().isoformat()
+    saved_date, used = daily_usage.get(user_id, (today, 0))
+    if saved_date != today:
+        used = 0
+    if used >= DAILY_LIMIT:
+        daily_usage[user_id] = (today, used)
+        return False, 0
+    used += 1
+    daily_usage[user_id] = (today, used)
+    return True, DAILY_LIMIT - used
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -48,6 +65,7 @@ async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Отправь матч текстом или скриншот линии. Запрос будет передан администратору.\n\n"
+        "🎁 Бесплатно: 2 запроса в день.\n"
         "⏱ Ответ — в течение 3–5 минут."
     )
 
@@ -60,6 +78,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     admin = admin_id()
 
+    # Admin replies directly to a forwarded request: copy the response to the user.
     if admin is not None and chat.id == admin:
         reply = message.reply_to_message
         if reply and reply.message_id in request_targets:
@@ -76,9 +95,18 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await message.reply_text("⚠️ Не удалось отправить ответ пользователю.")
         return
 
+    # Every non-command message from a regular user consumes one daily request.
     if admin is None:
         await message.reply_text(
             "⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render."
+        )
+        return
+
+    allowed, remaining = check_and_use_request(chat.id)
+    if not allowed:
+        await message.reply_text(
+            "⚠️ На сегодня бесплатные запросы закончились.\n\n"
+            "🎁 Лимит — 2 запроса в день. Попробуйте завтра."
         )
         return
 
@@ -90,6 +118,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"👤 {chat.first_name or ''} {chat.last_name or ''}".strip()
                 + f"\n🆔 {chat.id}"
                 + (f"\n🔗 @{chat.username}" if chat.username else "")
+                + f"\n🎁 Осталось бесплатных запросов сегодня: {remaining}"
                 + "\n\n⏱ Клиенту сообщено: ответ в течение 3–5 минут."
                 + "\n\nОтветь на пересланное сообщение готовым анализом."
             ),
@@ -101,7 +130,8 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         request_targets[forwarded.message_id] = chat.id
         await message.reply_text(
-            "📨 Запрос принят!\n\n⏱ Вы получите ответ в течение 3–5 минут."
+            f"📨 Запрос принят!\n\n⏱ Вы получите ответ в течение 3–5 минут.\n"
+            f"🎁 Осталось бесплатных запросов сегодня: {remaining}"
         )
     except Exception:
         log.exception("failed to relay user message")
@@ -130,12 +160,12 @@ async def lifespan(app: FastAPI):
         log.info("Telegram relay bot stopped")
 
 
-app = FastAPI(title="Sport Risk Analyst Pro", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Sport Risk Analyst Pro", version="0.3.0", lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
+    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay", "daily_limit": DAILY_LIMIT}
 
 
 @app.get("/health")
