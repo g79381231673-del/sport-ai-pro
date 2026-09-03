@@ -25,12 +25,11 @@ WELCOME = """🏟 SPORT RISK ANALYST PRO
 
 🎁 У тебя 2 бесплатных запроса в день.
 
-⏱ Вы получите ответ в течение 3–5 минут.
+⏱ Ответ на каждый запрос — в течение 5 минут — 1 часа.
 
 После этого администратор отправит вам готовый прогноз."""
 
 request_targets: dict[int, int] = {}
-# user_id -> [date string, number of requests today]
 daily_usage: dict[int, tuple[str, int]] = {}
 
 
@@ -66,7 +65,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "Отправь матч текстом или скриншот линии. Запрос будет передан администратору.\n\n"
         "🎁 Бесплатно: 2 запроса в день.\n"
-        "⏱ Ответ — в течение 3–5 минут."
+        "⏱ Ответ на каждый запрос — в течение 5 минут — 1 часа."
     )
 
 
@@ -95,13 +94,13 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await message.reply_text("⚠️ Не удалось отправить ответ пользователю.")
         return
 
-    # Every non-command message from a regular user consumes one daily request.
     if admin is None:
         await message.reply_text(
             "⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render."
         )
         return
 
+    # The first two requests of each calendar day are accepted and forwarded.
     allowed, remaining = check_and_use_request(chat.id)
     if not allowed:
         await message.reply_text(
@@ -119,7 +118,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 + f"\n🆔 {chat.id}"
                 + (f"\n🔗 @{chat.username}" if chat.username else "")
                 + f"\n🎁 Осталось бесплатных запросов сегодня: {remaining}"
-                + "\n\n⏱ Клиенту сообщено: ответ в течение 3–5 минут."
+                + "\n\n⏱ Клиенту сообщено: ответ в течение 5 минут — 1 часа."
                 + "\n\nОтветь на пересланное сообщение готовым анализом."
             ),
         )
@@ -130,7 +129,8 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         request_targets[forwarded.message_id] = chat.id
         await message.reply_text(
-            f"📨 Запрос принят!\n\n⏱ Вы получите ответ в течение 3–5 минут.\n"
+            f"📨 Запрос принят!\n\n"
+            f"⏱ Ответ на ваш запрос — в течение 5 минут — 1 часа.\n"
             f"🎁 Осталось бесплатных запросов сегодня: {remaining}"
         )
     except Exception:
