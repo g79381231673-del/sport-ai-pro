@@ -1,93 +1,140 @@
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from openai import AsyncOpenAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("sport-ai-pro")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-PROMPT_PATH = Path(__file__).parent / "prompts" / "risk_analyst_v10_4.md"
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
-if not os.getenv("OPENAI_API_KEY"):
-    raise RuntimeError("OPENAI_API_KEY is not configured")
 
-client = AsyncOpenAI()
-SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+WELCOME = """🏟 SPORT RISK ANALYST PRO
 
-WELCOME = """🏟 SPORT RISK ANALYST PRO\n\nОтправь мне матч, например:\n\n⚽ ЦСКА — Ростов, 10.09.2027\n🎾 Sinner — Alcaraz, 10.09.2027\n🏒 СКА — ЦСКА, 10.09.2027\n\nСначала я сделаю предварительный анализ без коэффициента.\nПосле этого ты сможешь прислать скриншот линии для финальной проверки."""
+Отправь мне матч или скриншот линии.
+
+Я передам запрос аналитику, после чего ты получишь готовый прогноз.
+
+⚠️ Анализ выполняется вручную через администратора."""
+
+# Maps the message ID seen by the admin to the original user's chat ID.
+request_targets: dict[int, int] = {}
+
+
+def admin_id() -> int | None:
+    try:
+        return int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
+    except ValueError:
+        return None
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 
+
+async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Твой Telegram ID: {update.effective_chat.id}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Отправь название матча и дату. Бот работает в два этапа: сначала анализ матча, затем проверка линии по скриншоту."
+        "Отправь матч текстом или скриншот линии. Запрос будет передан администратору."
     )
 
-async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (update.message.text or "").strip()
-    if not text:
+
+async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if not message or not chat:
         return
 
-    status = await update.message.reply_text("🔎 Идентифицирую матч и собираю анализ…")
+    admin = admin_id()
+
+    # Admin replies directly to a forwarded request: copy the response to the user.
+    if admin is not None and chat.id == admin:
+        reply = message.reply_to_message
+        if reply and reply.message_id in request_targets:
+            target_chat = request_targets[reply.message_id]
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_chat,
+                    from_chat_id=chat.id,
+                    message_id=message.message_id,
+                )
+                await message.reply_text("✅ Ответ отправлен пользователю.")
+            except Exception:
+                log.exception("failed to send admin response")
+                await message.reply_text("⚠️ Не удалось отправить ответ пользователю.")
+        return
+
+    # Regular user: forward the message to the administrator.
+    if admin is None:
+        await message.reply_text(
+            "⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render."
+        )
+        return
+
     try:
-        response = await client.responses.create(
-            model=MODEL,
-            instructions=SYSTEM_PROMPT,
-            input=(
-                "Выполни ЭТАП 1 V10.4 для запроса пользователя. "
-                "Не используй и не ищи букмекерские коэффициенты. "
-                "Пользовательский запрос:\n" + text
+        info = await context.bot.send_message(
+            chat_id=admin,
+            text=(
+                "📨 НОВЫЙ ЗАПРОС\n"
+                f"👤 {chat.first_name or ''} {chat.last_name or ''}".strip()
+                + f"\n🆔 {chat.id}"
+                + (f"\n🔗 @{chat.username}" if chat.username else "")
+                + "\n\nОтветь на пересланное сообщение своим готовым анализом."
             ),
         )
-        answer = response.output_text.strip()
-        if not answer:
-            answer = "🔴 ПРОПУСК\n\nМодель не вернула надёжный анализ."
-        await status.edit_text(answer)
-    except Exception:
-        log.exception("analysis failed")
-        await status.edit_text(
-            "⚠️ Не удалось выполнить анализ. Проверь настройки API и попробуй ещё раз."
+        forwarded = await context.bot.forward_message(
+            chat_id=admin,
+            from_chat_id=chat.id,
+            message_id=message.message_id,
         )
+        request_targets[forwarded.message_id] = chat.id
+        await message.reply_text("📨 Запрос принят. Аналитик готовит ответ.")
+    except Exception:
+        log.exception("failed to relay user message")
+        await message.reply_text("⚠️ Не удалось передать запрос. Попробуй ещё раз.")
+
 
 bot_app = Application.builder().token(BOT_TOKEN).build()
 bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CommandHandler("id", get_id))
 bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze))
+bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
-    log.info("Telegram bot started")
+    log.info("Telegram relay bot started")
     try:
         yield
     finally:
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
-        log.info("Telegram bot stopped")
+        log.info("Telegram relay bot stopped")
 
-app = FastAPI(title="Sport Risk Analyst Pro", version="0.1.1", lifespan=lifespan)
+
+app = FastAPI(title="Sport Risk Analyst Pro", version="0.2.0", lifespan=lifespan)
+
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "sport-ai-pro"}
+    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
+
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "sport-ai-pro"}
+    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
