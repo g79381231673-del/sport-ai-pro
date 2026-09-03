@@ -21,11 +21,12 @@ WELCOME = """🏟 SPORT RISK ANALYST PRO
 
 Отправь мне матч или скриншот линии.
 
-Я передам запрос аналитику, после чего ты получишь готовый прогноз.
+Я передам запрос аналитику.
 
-⚠️ Анализ выполняется вручную через администратора."""
+⏱ Вы получите ответ в течение 3–5 минут.
 
-# Maps the message ID seen by the admin to the original user's chat ID.
+После этого администратор отправит вам готовый прогноз."""
+
 request_targets: dict[int, int] = {}
 
 
@@ -46,7 +47,8 @@ async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Отправь матч текстом или скриншот линии. Запрос будет передан администратору."
+        "Отправь матч текстом или скриншот линии. Запрос будет передан администратору.\n\n"
+        "⏱ Ответ — в течение 3–5 минут."
     )
 
 
@@ -58,7 +60,6 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     admin = admin_id()
 
-    # Admin replies directly to a forwarded request: copy the response to the user.
     if admin is not None and chat.id == admin:
         reply = message.reply_to_message
         if reply and reply.message_id in request_targets:
@@ -75,7 +76,6 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await message.reply_text("⚠️ Не удалось отправить ответ пользователю.")
         return
 
-    # Regular user: forward the message to the administrator.
     if admin is None:
         await message.reply_text(
             "⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render."
@@ -83,14 +83,15 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        info = await context.bot.send_message(
+        await context.bot.send_message(
             chat_id=admin,
             text=(
                 "📨 НОВЫЙ ЗАПРОС\n"
                 f"👤 {chat.first_name or ''} {chat.last_name or ''}".strip()
                 + f"\n🆔 {chat.id}"
                 + (f"\n🔗 @{chat.username}" if chat.username else "")
-                + "\n\nОтветь на пересланное сообщение своим готовым анализом."
+                + "\n\n⏱ Клиенту сообщено: ответ в течение 3–5 минут."
+                + "\n\nОтветь на пересланное сообщение готовым анализом."
             ),
         )
         forwarded = await context.bot.forward_message(
@@ -99,7 +100,9 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             message_id=message.message_id,
         )
         request_targets[forwarded.message_id] = chat.id
-        await message.reply_text("📨 Запрос принят. Аналитик готовит ответ.")
+        await message.reply_text(
+            "📨 Запрос принят!\n\n⏱ Вы получите ответ в течение 3–5 минут."
+        )
     except Exception:
         log.exception("failed to relay user message")
         await message.reply_text("⚠️ Не удалось передать запрос. Попробуй ещё раз.")
