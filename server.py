@@ -80,6 +80,12 @@ def get_plan(uid):
 def current_limit(uid):
     p=get_plan(uid);return int(p["daily_limit"]) if p else FREE_DAILY_LIMIT
 
+def get_used_today(uid):
+    today=datetime.now().date().isoformat()
+    with db() as c:
+        r=c.execute("SELECT used FROM usage WHERE user_id=? AND usage_date=?",(uid,today)).fetchone()
+    return int(r["used"]) if r else 0
+
 def check_and_use_request(uid):
     limit=current_limit(uid);today=datetime.now().date().isoformat()
     with db() as c:
@@ -92,8 +98,20 @@ def menu():
     return ReplyKeyboardMarkup([[KeyboardButton("🏟 Сделать анализ"),KeyboardButton("💳 Тарифы")],[KeyboardButton("👤 Мой профиль"),KeyboardButton("📊 Мои запросы")],[KeyboardButton("ℹ️ Как это работает"),KeyboardButton("👨‍💻 Поддержка")]],resize_keyboard=True)
 
 async def start(update,context):
-    if update.effective_chat:save_user(update.effective_chat)
-    await update.message.reply_text(MAINTENANCE_TEXT if maintenance_mode else WELCOME,reply_markup=menu())
+    chat=update.effective_chat
+    if not chat:return
+    save_user(chat)
+    limit=current_limit(chat.id); used=get_used_today(chat.id); remaining=max(0,limit-used)
+    if maintenance_mode:
+        text=MAINTENANCE_TEXT
+    elif used==0:
+        text=WELCOME
+    elif remaining>0:
+        text=f"👋 С возвращением!\n\n📊 Сегодня у вас осталось: {remaining} из {limit} запросов.\n\n🏟 Можете отправить следующий матч или выбрать нужный раздел ниже."
+    else:
+        text=f"👋 С возвращением!\n\n⚠️ Все {limit} запросов на сегодня уже использованы.\n\n💳 Посмотреть доступные тарифы можно в разделе «💳 Тарифы»."
+    await update.message.reply_text(text,reply_markup=menu())
+
 async def get_id(update,context):
     if update.effective_chat:save_user(update.effective_chat)
     await update.message.reply_text(f"Твой Telegram ID: {update.effective_chat.id}",reply_markup=menu())
@@ -103,16 +121,13 @@ async def prices_command(update,context):
 async def profile_command(update,context):
     chat=update.effective_chat
     if not chat:return
-    save_user(chat);p=get_plan(chat.id);limit=int(p["daily_limit"]) if p else FREE_DAILY_LIMIT;today=datetime.now().date().isoformat()
-    with db() as c:r=c.execute("SELECT used FROM usage WHERE user_id=? AND usage_date=?",(chat.id,today)).fetchone()
-    used=int(r["used"]) if r else 0;plan_text=(f"⚡ PRO {limit}\n📅 Действует до: {datetime.fromisoformat(p['expires_at']).strftime('%d.%m.%Y %H:%M')}" if p else "🎁 Бесплатный тариф")
+    save_user(chat);p=get_plan(chat.id);limit=int(p["daily_limit"]) if p else FREE_DAILY_LIMIT;used=get_used_today(chat.id)
+    plan_text=(f"⚡ PRO {limit}\n📅 Действует до: {datetime.fromisoformat(p['expires_at']).strftime('%d.%m.%Y %H:%M')}" if p else "🎁 Бесплатный тариф")
     await update.message.reply_text(f"👤 МОЙ ПРОФИЛЬ\n\n{plan_text}\n📊 Сегодня: {used}/{limit} запросов\n🟢 Осталось: {max(0,limit-used)}",reply_markup=menu())
 async def my_requests_command(update,context):
     chat=update.effective_chat
     if not chat:return
-    save_user(chat);today=datetime.now().date().isoformat()
-    with db() as c:r=c.execute("SELECT used FROM usage WHERE user_id=? AND usage_date=?",(chat.id,today)).fetchone()
-    used=int(r["used"]) if r else 0;limit=current_limit(chat.id)
+    save_user(chat);used=get_used_today(chat.id);limit=current_limit(chat.id)
     await update.message.reply_text(f"📊 ВАШИ ЗАПРОСЫ\n\nСегодня использовано: {used}/{limit}\nОсталось сегодня: {max(0,limit-used)}",reply_markup=menu())
 async def how_command(update,context): await update.message.reply_text("ℹ️ КАК ЭТО РАБОТАЕТ\n\n1️⃣ Отправьте матч или скриншот линии.\n2️⃣ Бот передаст запрос администратору.\n3️⃣ Аналитик проведёт проверку.\n4️⃣ Готовый ответ придёт вам в этот чат.\n\n⏱ Обычно ответ приходит в течение 5 минут — 1 часа.",reply_markup=menu())
 async def support_command(update,context): await update.message.reply_text("👨‍💻 ПОДДЕРЖКА\n\nПо вопросам оплаты и доступа: @ZotickNick",reply_markup=menu())
@@ -138,13 +153,14 @@ async def maintenance_command(update,context):
 async def relay_message(update,context):
     message=update.effective_message;chat=update.effective_chat
     if not message or not chat:return
-    save_user(chat);admin=admin_id()
+    admin=admin_id()
     if admin is not None and chat.id==admin:
         reply=message.reply_to_message
         if reply and reply.message_id in request_targets:
             try:await context.bot.copy_message(chat_id=request_targets[reply.message_id],from_chat_id=chat.id,message_id=message.message_id);await message.reply_text("✅ Ответ отправлен пользователю.")
             except Exception:log.exception("failed to send admin response")
         return
+    save_user(chat)
     if maintenance_mode:await message.reply_text(MAINTENANCE_TEXT,reply_markup=menu());return
     if admin is None:await message.reply_text("⚠️ Бот ещё не настроен.",reply_markup=menu());return
     text=message.text or ""
@@ -154,12 +170,6 @@ async def relay_message(update,context):
     if text=="ℹ️ Как это работает":await how_command(update,context);return
     if text=="👨‍💻 Поддержка":await support_command(update,context);return
     if text=="🏟 Сделать анализ":await message.reply_text("🏟 Отлично! Отправьте матч или скриншот линии сюда 👇",reply_markup=menu());return
-    # First user message: show welcome/menu without requiring /start, then continue processing it as a request.
-    today=datetime.now().date().isoformat()
-    with db() as c:
-        exists=c.execute("SELECT 1 FROM users WHERE user_id=?",(chat.id,)).fetchone()
-    if not exists:
-        await message.reply_text(WELCOME,reply_markup=menu())
     allowed,remaining,limit=check_and_use_request(chat.id)
     if not allowed:
         await message.reply_text(f"⚠️ Лимит {limit} запросов на сегодня исчерпан.\n\n💳 Для продолжения доступны тарифы:\n🔥 5 запросов/день — 250 ₽ за 7 дней или 500 ₽ за 14 дней\n⚡ 10 запросов/день — 600 ₽ за 7 дней или 1 000 ₽ за 14 дней\n\n📩 Для оплаты: @ZotickNick\nПодробнее: /prices",reply_markup=menu());return
@@ -177,7 +187,7 @@ async def lifespan(app:FastAPI):
     init_db();await bot_app.initialize();await bot_app.start();await bot_app.updater.start_polling();log.info("Telegram relay bot started")
     try:yield
     finally:await bot_app.updater.stop();await bot_app.stop();await bot_app.shutdown()
-app=FastAPI(title="Sport Risk Analyst Pro",version="1.0.0",lifespan=lifespan)
+app=FastAPI(title="Sport Risk Analyst Pro",version="1.0.1",lifespan=lifespan)
 @app.get("/")
 async def root():return {"status":"ok","service":"sport-ai-pro","mode":"manual-relay","database":"sqlite","maintenance":maintenance_mode}
 @app.get("/health")
