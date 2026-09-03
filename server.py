@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from telegram import Update
@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("sport-ai-pro")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
-DAILY_LIMIT = 2
+FREE_DAILY_LIMIT = 2
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
 WELCOME = """🏟 SPORT RISK ANALYST PRO
@@ -42,33 +42,74 @@ PRICES = """💳 ТАРИФЫ SPORT RISK ANALYST PRO
 • 7 дней — 600 ₽
 • 14 дней — 1 000 ₽
 
-ℹ️ Оплата и активация тарифа пока оформляются через администратора."""
+📩 Для оплаты: @ZotickNick
+
+После оплаты администратор активирует тариф."""
 request_targets: dict[int, int] = {}
 daily_usage: dict[int, tuple[str, int]] = {}
+# user_id -> (daily_limit, expires_at_iso)
+paid_plans: dict[int, tuple[int, str]] = {}
 def admin_id() -> int | None:
     try:
         return int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
     except ValueError:
         return None
-def check_and_use_request(user_id: int) -> tuple[bool, int]:
+def current_limit(user_id: int) -> int:
+    plan = paid_plans.get(user_id)
+    if not plan:
+        return FREE_DAILY_LIMIT
+    limit, expires = plan
+    try:
+        if datetime.fromisoformat(expires) > datetime.now():
+            return limit
+    except ValueError:
+        pass
+    paid_plans.pop(user_id, None)
+    return FREE_DAILY_LIMIT
+def check_and_use_request(user_id: int) -> tuple[bool, int, int]:
+    limit = current_limit(user_id)
     today = datetime.now().date().isoformat()
     saved_date, used = daily_usage.get(user_id, (today, 0))
     if saved_date != today:
         used = 0
-    if used >= DAILY_LIMIT:
+    if used >= limit:
         daily_usage[user_id] = (today, used)
-        return False, 0
+        return False, 0, limit
     used += 1
     daily_usage[user_id] = (today, used)
-    return True, DAILY_LIMIT - used
+    return True, limit - used, limit
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(WELCOME)
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Твой Telegram ID: {update.effective_chat.id}")
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Отправь матч текстом или скриншот линии. Запрос будет передан администратору.\n\n🎁 Бесплатно: 2 запроса в день.\n💳 Для расширенного доступа используй /prices.\n⏱ Ответ — в течение 5 минут — 1 часа.")
+    await update.message.reply_text("Отправь матч текстом или скриншот линии. Запрос будет передан администратору.\n\n🎁 Бесплатно: 2 запроса в день.\n💳 Тарифы: /prices\n⏱ Ответ — в течение 5 минут — 1 часа.")
 async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(PRICES)
+async def give_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    admin = admin_id()
+    if admin is None or update.effective_chat.id != admin:
+        return
+    if len(context.args) != 3:
+        await update.message.reply_text("Формат: /give USER_ID LIMIT DAYS\nНапример: /give 5907925729 10 7")
+        return
+    try:
+        user_id = int(context.args[0])
+        limit = int(context.args[1])
+        days = int(context.args[2])
+        if limit not in (5, 10) or days not in (7, 14):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Ошибка. LIMIT: 5 или 10. DAYS: 7 или 14.")
+        return
+    expires = datetime.now() + timedelta(days=days)
+    paid_plans[user_id] = (limit, expires.isoformat())
+    daily_usage.pop(user_id, None)
+    await update.message.reply_text(f"✅ Тариф активирован\n👤 {user_id}\n⚡ {limit} запросов/день\n📅 {days} дней\n⏳ До: {expires.strftime('%d.%m.%Y %H:%M')}")
+    try:
+        await context.bot.send_message(chat_id=user_id, text=f"✅ Вам активирован тариф: {limit} запросов в день на {days} дней.\n\nТариф действует до {expires.strftime('%d.%m.%Y %H:%M')}.")
+    except Exception:
+        log.exception("failed to notify user about paid plan")
 async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     chat = update.effective_chat
@@ -89,15 +130,15 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if admin is None:
         await message.reply_text("⚠️ Бот ещё не настроен. Администратор должен добавить ADMIN_CHAT_ID в Render.")
         return
-    allowed, remaining = check_and_use_request(chat.id)
+    allowed, remaining, limit = check_and_use_request(chat.id)
     if not allowed:
-        await message.reply_text("⚠️ Бесплатные запросы на сегодня закончились.\n\n💳 Доступны расширенные тарифы:\n🔥 5 запросов/день — 250 ₽ за 7 дней или 500 ₽ за 14 дней\n⚡ 10 запросов/день — 600 ₽ за 7 дней или 1 000 ₽ за 14 дней\n\nНапиши /prices, чтобы посмотреть тарифы.")
+        await message.reply_text(f"⚠️ Лимит {limit} запросов на сегодня исчерпан.\n\n💳 Для продолжения доступны тарифы:\n🔥 5 запросов/день — 250 ₽ за 7 дней или 500 ₽ за 14 дней\n⚡ 10 запросов/день — 600 ₽ за 7 дней или 1 000 ₽ за 14 дней\n\n📩 Для оплаты: @ZotickNick\nПодробнее: /prices")
         return
     try:
-        await context.bot.send_message(chat_id=admin, text=("📨 НОВЫЙ ЗАПРОС\n" + f"👤 {chat.first_name or ''} {chat.last_name or ''}".strip() + f"\n🆔 {chat.id}" + (f"\n🔗 @{chat.username}" if chat.username else "") + f"\n🎁 Осталось бесплатных запросов сегодня: {remaining}" + "\n\n⏱ Клиенту сообщено: ответ в течение 5 минут — 1 часа." + "\n\nОтветь на пересланное сообщение готовым анализом."))
+        await context.bot.send_message(chat_id=admin, text=("📨 НОВЫЙ ЗАПРОС\n" + f"👤 {chat.first_name or ''} {chat.last_name or ''}".strip() + f"\n🆔 {chat.id}" + (f"\n🔗 @{chat.username}" if chat.username else "") + f"\n🎁 Осталось запросов сегодня: {remaining}/{limit}" + "\n\n⏱ Клиенту сообщено: ответ в течение 5 минут — 1 часа.\n\nОтветь на пересланное сообщение готовым анализом."))
         forwarded = await context.bot.forward_message(chat_id=admin, from_chat_id=chat.id, message_id=message.message_id)
         request_targets[forwarded.message_id] = chat.id
-        await message.reply_text(f"📨 Запрос принят!\n\n⏱ Ответ на ваш запрос — в течение 5 минут — 1 часа.\n🎁 Осталось бесплатных запросов сегодня: {remaining}")
+        await message.reply_text(f"📨 Запрос принят!\n\n⏱ Ответ на ваш запрос — в течение 5 минут — 1 часа.\n🎁 Осталось запросов сегодня: {remaining}/{limit}")
     except Exception:
         log.exception("failed to relay user message")
         await message.reply_text("⚠️ Не удалось передать запрос. Попробуй ещё раз.")
@@ -106,6 +147,7 @@ bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CommandHandler("id", get_id))
 bot_app.add_handler(CommandHandler("help", help_command))
 bot_app.add_handler(CommandHandler("prices", prices_command))
+bot_app.add_handler(CommandHandler("give", give_command))
 bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -119,11 +161,10 @@ async def lifespan(app: FastAPI):
         await bot_app.updater.stop()
         await bot_app.stop()
         await bot_app.shutdown()
-        log.info("Telegram relay bot stopped")
-app = FastAPI(title="Sport Risk Analyst Pro", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Sport Risk Analyst Pro", version="0.5.0", lifespan=lifespan)
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay", "daily_limit": DAILY_LIMIT}
+    return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "sport-ai-pro", "mode": "manual-relay"}
